@@ -1,0 +1,6 @@
+path : C:\Users\user\Desktop\sesac08code\deep-learning-lab\Data\PeachDataset\YoloDataset
+train : images/train
+val : images/valid
+
+names : 
+  0 : peach
