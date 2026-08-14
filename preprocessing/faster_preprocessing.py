@@ -1,0 +1,212 @@
+import json
+import os
+import random
+import shutil
+from PIL import Image
+import torch
+from torch.utils.data import Dataset,DataLoader
+from torchvision import transforms
+
+NUTS_CATEGORY_MAP = {
+    208: 1,   # 도토리
+    209: 2,   # 밤
+    210: 3,   # 은행
+    211: 4,   # 피칸
+    212: 5,   # 호박씨
+    213: 6,   # 마카다미아
+    214: 7,   # 브라질너트
+    215: 8,   # 잣
+    216: 9,   # 호두
+    217: 10,  # 해바라기씨
+    218: 11,  # 밤송이
+    219: 12,  # 아몬드
+    220: 13,  # 피스타치오
+    221: 14,  # 땅콩
+    222: 15,  # 캐슈넛
+}
+
+NUTS_CLASS_NAMES = {v: k_name for k_name, v in {
+    '도토리': 1, '밤': 2, '은행': 3, '피칸': 4, '호박씨': 5,
+    '마카다미아': 6, '브라질너트': 7, '잣': 8, '호두': 9, '해바라기씨': 10,
+    '밤송이': 11, '아몬드': 12, '피스타치오': 13, '땅콩': 14, '캐슈넛': 15,
+}.items()}
+
+
+#이미지와 라벨을 묶어서 한번에 주는 상자
+#모델 -> 전처리 "모델이 어떤 "
+class NutDataset(Dataset):
+    #데이터셋을 만들때 필요한 핵심 정보: 이미지,라벨 폴더의 경로/ 트랜스폼
+    #transforms=None / transforms값을 주지 않았을때는 None이 디폴트
+    def __init__(self,image_dir,label_dir):
+        self.image_dir = image_dir
+        self.transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.5),(0.5))
+        ])
+        self.label_dir = label_dir
+
+        self.samples = []
+        self.extract_label_data(self.label_dir)
+   
+
+    #데이터의 길이가 얼마야?
+    def __len__(self):
+        #데이터가 있는 위치의 파일 개수 반환
+        return len(self.samples)
+
+    #이미지-라벨 쌍 반환
+    def __getitem__(self,index):
+        #self.samples안에 이미지,라벨 전부 존재
+        sample = self.samples[index]
+
+        #이미지
+        image = Image.open(sample['img_path']).convert('RGB')
+
+        #라벨 -> bbox, cls(어떤 오브젝트인지)
+        boxes = torch.tensor(sample['boxes'], dtype=torch.float32)
+        cls = torch.tensor(sample['labels'], dtype=torch.int64)
+
+        # 0   1   2   3
+        #[x1, y1, x2, y2] 너비 계산 -> 여러개의 박스에 대해, 여러 개(각 박스)별로 수행
+
+        #faster rcnn
+        target = {
+            'boxes' : boxes,
+            'labels' : cls,
+            'image_id': torch.tensor([index]),
+            'area': (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3]  - boxes[:, 1]),
+            'iscrowd': torch.zeros(len(cls), dtype=torch.uint8) #개별 객체니? 뭉쳐있니?
+
+        }
+
+        image = self.transform(image)
+
+        return image, target
+    
+
+    #사진과 라벨을 연결해 놓는 준비 단계
+    #label_dir => 모든 라벨이 있는 폴더
+    #label_dir => 모든 라벨이 있는 폴더
+    def extract_label_data(self, label_dir):
+        for f in sorted(os.listdir(label_dir)):
+            # f-> 그 label_dir 아래에 있는 1개의 파일 이름 `~~.json`
+            
+            if not f.endswith('.json'): #if ~json으로 끝나지 않으면 : 다음 반복문까지 패스(continue)
+                continue
+
+            file_path = os.path.join(label_dir, f)
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            file_name = data['images'][0]['file_name']
+            image_path = os.path.join(self.image_dir, file_name)
+
+            #boxes는 object의 bbox, labels는 object의 cls
+            boxes, labels = [], []
+            for ann in data['annotations']:
+                x, y, w, h = ann['bbox']
+                x1, y1 = x, y
+                x2, y2 = x+w, y+h
+
+                if x2 <= x1 or y2 <= y1:
+                    continue
+
+                label = NUTS_CATEGORY_MAP.get(ann['category_id'])
+                if label is None:
+                    continue
+
+                boxes.append([x1, y1, x2, y2])
+                labels.append(label)
+
+            if not boxes:
+                continue
+
+
+            self.samples.append({
+                'img_path' : image_path,
+                'boxes' : boxes,
+                'labels' : labels
+            })
+
+#image와 label폴더 위치를 주면 일정 비율로 쪼개서 train_image, train_label, valid_image, valid_label
+def copy_split_files(file_list,image_dir,label_dir,out_image_dir,out_label_dir):
+    os.mkdir(out_image_dir)
+    os.mkdir(out_label_dir)
+
+    for f in file_list:
+        filename = os.path.splitext(f)[0]+'.jpg'
+
+        src_img = os.path.join(image_dir,filename)
+        if os.path.exists(src_img):
+            shutil.copy2(src_img,os.path.join(out_image_dir,filename))
+            # print(f'{src_img}를 {os.path.join(out_image_dir,filename)}로')
+
+        src_lab = os.path.join(label_dir,f)
+        if os.path.exists(src_lab):
+            shutil.copy2(src_lab,os.path.join(out_label_dir,f))
+            # print(f'{src_lab}를 {os.path.join(out_label_dir,f)}로')
+
+#Train, Valid => 각 폴더에 맞게 copy_split_files를 수행!
+def split_json_files(label_dir,ratio=0.8,seed=42):
+    file_list = sorted([f for f in os.listdir(label_dir) if f.endswith('.json')])
+
+    random.seed(seed)   
+    random.shuffle(file_list)
+
+    split = int(len(file_list)* ratio)
+    return file_list[:split],file_list[split:]
+
+def get_nuts_dataloader(image_dir, label_dir):
+    '''
+    Nuts 이미지와 라벨을 바탕으로,train_image, train_label
+    valid_iamge,valid_label을 추출한다!
+    앞서 정의한 copy_split_files와 split_json_files를 써먹어서 만듦
+    '''
+    os.mkdir(r'Data\NutsDataset\train')
+    os.mkdir(r'Data\NutsDataset\valid')
+    train_image = r'Data\NutsDataset\train\image'
+    train_label = r'Data\NutsDataset\train\label'
+    valid_image = r'Data\NutsDataset\valid\image'
+    valid_label = r'Data\NutsDataset\valid\label'
+
+    train_files,valid_files = split_json_files(label_dir,ratio=0.8,seed = 42)
+
+    copy_split_files(train_files,image_dir,label_dir,train_image,train_label)
+    copy_split_files(valid_files,image_dir,label_dir,valid_image,valid_label)
+
+    train_ds = NutDataset(train_image,train_label)
+    valid_ds = NutDataset(valid_image,valid_label)
+
+    train_loader = DataLoader(train_ds,
+                              batch_size=2,
+                              shuffle=True,
+                              num_workers=0,
+                              collate_fn=collate_fn)
+    valid_loader = DataLoader(valid_ds,
+                              batch_size=2,
+                              shuffle=True,
+                              num_workers=0,
+                              collate_fn=collate_fn)
+    return train_loader,valid_loader
+
+#배치별로 데이터를 묶어줌 -> ObjectDetecttion에서 하나의 이미지에 여러개의 객체가 있을 때 묶어주는 역할
+#Pytorch model zoo의 faster rcnn 쓸때는 필수
+def collate_fn(batch):
+    return tuple(zip(*batch))
+
+# if __name__ == '__main__':
+#     image_dir = r'Data\NutsDataset\images'
+#     label_dir = r'Data\NutsDataset\labels'
+
+#     out_image_dir = r'Data\NutsDataset\sample_image'
+#     out_label_dir = r'Data\NutsDataset\sample_label'
+
+#     file_list = sorted([f for f in os.listdir(label_dir) if f.endswith('.json')])
+#     copy_split_files(file_list, image_dir, label_dir, out_image_dir, out_label_dir)
+
+   
+    # trans = None
+    # nuts = NutDataset(image_dir=image_dir,label_dir=label_dir,transforms=trans)
+    # print(nuts.samples)
+
+
